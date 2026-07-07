@@ -862,7 +862,10 @@ def broadcast_focus() -> None:
 
 
 def broadcast_voice() -> None:
-    broadcast_event("voice")
+    # Voice is driven by ADB against the configured device only. Broadcasting it
+    # would wake every connected phone app, which is wrong when multiple phones
+    # are paired.
+    return
 
 
 def broadcast_clear() -> None:
@@ -1001,6 +1004,34 @@ def adb_base_command(adb: str, device_serial: str = "") -> list[str]:
     return [adb]
 
 
+def is_configured_adb_device_connected(adb: str, device_serial: str) -> bool:
+    if not device_serial:
+        (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(
+            "voice target blocked: voice_tap_config.json has no device_serial\n"
+        )
+        return False
+    try:
+        result = subprocess.run(
+            [adb, "devices"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(f"adb devices failed: {exc!r}\n")
+        return False
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == device_serial and parts[1] == "device":
+            return True
+    (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(
+        f"voice target blocked: configured device {device_serial} is not connected\n"
+    )
+    return False
+
+
 def launch_android_app(device_serial: str = "") -> None:
     global last_adb_launch
     now = time.monotonic()
@@ -1083,6 +1114,8 @@ def send_android_voice_motion(action: str, config: dict[str, object] | None = No
     if config is None:
         config = load_voice_tap_config()
     device_serial = str(config.get("device_serial", "") or "")
+    if not is_configured_adb_device_connected(adb, device_serial):
+        return
     try:
         subprocess.run(
             [
@@ -1115,6 +1148,18 @@ def start_android_voice_hold() -> None:
         press_id = VOICE_PRESS_ID
     config = load_voice_tap_config()
     device_serial = str(config.get("device_serial", "") or "")
+    adb = find_adb()
+    if not adb:
+        (APP_DIR / "server.err.log").open("a", encoding="utf-8").write("adb not found for voice hold\n")
+        with VOICE_PRESS_LOCK:
+            if press_id == VOICE_PRESS_ID:
+                VOICE_PRESS_ACTIVE = False
+        return
+    if not is_configured_adb_device_connected(adb, device_serial):
+        with VOICE_PRESS_LOCK:
+            if press_id == VOICE_PRESS_ID:
+                VOICE_PRESS_ACTIVE = False
+        return
     launch_android_app(device_serial)
     time.sleep(max(0, int(config["delay_ms"])) / 1000)
     with VOICE_PRESS_LOCK:
@@ -1513,6 +1558,8 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     continue
                 if event_name in {"focus", "voice", "clear"}:
+                    if event_name == "voice":
+                        continue
                     packet = f"event: {event_name}\ndata: {{}}\n\n".encode("utf-8")
                     self.wfile.write(packet)
                     self.wfile.flush()
