@@ -1236,7 +1236,9 @@ def focus_hook_worker() -> None:
             return
         last_sent = now
         broadcast_focus()
-        launch_android_app()
+        config = load_voice_tap_config()
+        device_serial = str(config.get("device_serial", "") or "")
+        launch_android_app(device_serial)
 
     FOCUS_CALLBACK = WinEventProc(on_focus_event)
     hook = user32.SetWinEventHook(
