@@ -1,0 +1,9 @@
+﻿# One keyword per line. Matches foreground window title, process name, or process path.
+codex
+gpt
+chatgpt
+openai
+chat.openai
+chat.openai.com
+爱马仕
+hermes

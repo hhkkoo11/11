@@ -1,0 +1,13 @@
+token.txt
+current_url.txt
+server*.log
+*.log
+__pycache__/
+*.pyc
+uploads/
+android_app/.gradle/
+android_app/build/
+android_app/app/build/
+android_app/local.properties
+*.keystore
+*.jks
