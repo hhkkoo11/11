@@ -970,7 +970,7 @@ def clear_phone_after_keyboard_send() -> None:
         broadcast_clear()
 
 
-def load_voice_tap_config() -> dict[str, int]:
+def load_voice_tap_config() -> dict[str, object]:
     default = {"device_serial": "", "x": 600, "y": 2495, "delay_ms": 250, "hold_ms": 700}
     if not VOICE_TAP_CONFIG_FILE.exists():
         VOICE_TAP_CONFIG_FILE.write_text(json.dumps(default, indent=2), encoding="utf-8")
@@ -989,6 +989,21 @@ def load_voice_tap_config() -> dict[str, int]:
         return default
 
 
+def save_voice_tap_config(config: dict[str, object]) -> dict[str, object]:
+    current = load_voice_tap_config()
+    merged = {
+        "device_serial": str(config.get("device_serial", current["device_serial"]) or ""),
+        "x": int(config.get("x", current["x"]) or 0),
+        "y": int(config.get("y", current["y"]) or 0),
+        "delay_ms": int(config.get("delay_ms", current["delay_ms"]) or 0),
+        "hold_ms": int(config.get("hold_ms", current["hold_ms"]) or 1),
+    }
+    if merged["hold_ms"] < 1:
+        merged["hold_ms"] = 1
+    VOICE_TAP_CONFIG_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    return merged
+
+
 def find_adb() -> str | None:
     for adb_path in ADB_PATHS:
         if adb_path.is_absolute() and adb_path.exists():
@@ -996,6 +1011,57 @@ def find_adb() -> str | None:
         if not adb_path.is_absolute():
             return str(adb_path)
     return None
+
+
+def list_adb_devices() -> list[dict[str, str]]:
+    adb = find_adb()
+    if not adb:
+        return []
+    try:
+        result = subprocess.run(
+            [adb, "devices", "-l"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(f"adb device list failed: {exc!r}\n")
+        return []
+    devices: list[dict[str, str]] = []
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        serial, state = parts[0], parts[1]
+        meta: dict[str, str] = {}
+        for item in parts[2:]:
+            if ":" in item:
+                key, value = item.split(":", 1)
+                meta[key] = value
+        devices.append(
+            {
+                "serial": serial,
+                "state": state,
+                "model": meta.get("model", ""),
+                "product": meta.get("product", ""),
+                "device": meta.get("device", ""),
+            }
+        )
+    return devices
+
+
+def voice_target_status() -> dict[str, object]:
+    config = load_voice_tap_config()
+    devices = list_adb_devices()
+    target = str(config.get("device_serial", "") or "")
+    return {
+        "ok": True,
+        "config": config,
+        "devices": devices,
+        "target_connected": any(device["serial"] == target and device["state"] == "device" for device in devices),
+    }
 
 
 def adb_base_command(adb: str, device_serial: str = "") -> list[str]:
@@ -1515,11 +1581,255 @@ PAGE = """<!doctype html>
 </html>"""
 
 
+CONTROL_PAGE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>手机输入助手控制面板</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f6f7f8;
+      color: #111;
+      font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      width: min(920px, calc(100vw - 32px));
+      margin: 28px auto;
+    }
+    h1 {
+      margin: 0 0 18px;
+      font-size: 24px;
+      font-weight: 750;
+      letter-spacing: 0;
+    }
+    .panel {
+      background: #fff;
+      border: 1px solid #dedede;
+      border-radius: 8px;
+      padding: 18px;
+      margin-bottom: 14px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-top: 1px solid #eee;
+      padding: 12px 0;
+    }
+    .row:first-child { border-top: 0; }
+    .name { font-weight: 650; }
+    .meta { color: #666; font-size: 13px; margin-top: 2px; word-break: break-all; }
+    .active {
+      color: #087a3a;
+      font-weight: 700;
+      margin-left: 8px;
+    }
+    button {
+      border: 1px solid #111;
+      background: #111;
+      color: #fff;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button.secondary {
+      background: #fff;
+      color: #111;
+      border-color: #c9c9c9;
+    }
+    button:disabled {
+      opacity: .45;
+      cursor: default;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    label { display: grid; gap: 5px; color: #444; font-size: 13px; }
+    input {
+      width: 100%;
+      border: 1px solid #cfcfcf;
+      border-radius: 6px;
+      padding: 9px 10px;
+      font: inherit;
+      color: #111;
+      background: #fff;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .status {
+      min-height: 22px;
+      color: #555;
+      margin-top: 10px;
+    }
+    @media (max-width: 640px) {
+      main { width: calc(100vw - 22px); margin: 16px auto; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .row { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>手机输入助手控制面板</h1>
+    <section class="panel">
+      <div class="name">侧键语音目标</div>
+      <div class="meta" id="current">读取中...</div>
+      <div id="devices"></div>
+    </section>
+    <section class="panel">
+      <div class="name">语音按钮参数</div>
+      <div class="meta">不同手机输入法按钮位置不一样。切换手机后，如果按侧键没点到语音键，就调这里。</div>
+      <div class="grid" style="margin-top: 12px;">
+        <label>X 坐标<input id="x" type="number" inputmode="numeric"></label>
+        <label>Y 坐标<input id="y" type="number" inputmode="numeric"></label>
+        <label>触发延迟 ms<input id="delay_ms" type="number" inputmode="numeric"></label>
+        <label>按住时长 ms<input id="hold_ms" type="number" inputmode="numeric"></label>
+      </div>
+      <div class="actions">
+        <button id="save">保存参数</button>
+        <button class="secondary" id="refresh">刷新设备</button>
+      </div>
+      <div class="status" id="status"></div>
+    </section>
+  </main>
+  <script>
+    const key = new URLSearchParams(location.search).get("key") || "";
+    const devicesEl = document.getElementById("devices");
+    const currentEl = document.getElementById("current");
+    const statusEl = document.getElementById("status");
+    const fields = ["x", "y", "delay_ms", "hold_ms"].reduce((acc, id) => {
+      acc[id] = document.getElementById(id);
+      return acc;
+    }, {});
+    let config = null;
+
+    function setStatus(text) {
+      statusEl.textContent = text || "";
+    }
+
+    function deviceLabel(device) {
+      const model = device.model || device.product || device.device || "Android";
+      return `${model} (${device.serial})`;
+    }
+
+    async function api(path, options = {}) {
+      const join = path.includes("?") ? "&" : "?";
+      const response = await fetch(`${path}${join}key=${encodeURIComponent(key)}`, options);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    }
+
+    function render(data) {
+      config = data.config;
+      for (const id of Object.keys(fields)) fields[id].value = config[id] ?? "";
+      const target = config.device_serial || "";
+      currentEl.textContent = target
+        ? `当前绑定：${target}${data.target_connected ? "，在线" : "，未在线"}`
+        : "当前没有绑定手机";
+      devicesEl.innerHTML = "";
+      if (!data.devices.length) {
+        const empty = document.createElement("div");
+        empty.className = "meta";
+        empty.style.marginTop = "12px";
+        empty.textContent = "没有检测到 ADB 手机。请连接数据线并允许 USB 调试。";
+        devicesEl.appendChild(empty);
+        return;
+      }
+      for (const device of data.devices) {
+        const row = document.createElement("div");
+        row.className = "row";
+        const left = document.createElement("div");
+        const name = document.createElement("div");
+        name.className = "name";
+        name.textContent = deviceLabel(device);
+        if (device.serial === target) {
+          const active = document.createElement("span");
+          active.className = "active";
+          active.textContent = "当前";
+          name.appendChild(active);
+        }
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = `状态：${device.state}`;
+        left.appendChild(name);
+        left.appendChild(meta);
+        const button = document.createElement("button");
+        button.textContent = device.serial === target ? "已选择" : "设为侧键语音";
+        button.disabled = device.serial === target || device.state !== "device";
+        button.addEventListener("click", () => selectDevice(device.serial));
+        row.appendChild(left);
+        row.appendChild(button);
+        devicesEl.appendChild(row);
+      }
+    }
+
+    async function refresh() {
+      setStatus("正在读取设备...");
+      try {
+        render(await api("/api/voice-target"));
+        setStatus("");
+      } catch (error) {
+        setStatus(`读取失败：${error.message}`);
+      }
+    }
+
+    async function selectDevice(serial) {
+      setStatus("正在切换...");
+      try {
+        render(await api("/api/voice-target", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device_serial: serial })
+        }));
+        setStatus("已切换侧键语音手机。");
+      } catch (error) {
+        setStatus(`切换失败：${error.message}`);
+      }
+    }
+
+    async function saveParams() {
+      if (!config) return;
+      setStatus("正在保存...");
+      const body = { device_serial: config.device_serial || "" };
+      for (const id of Object.keys(fields)) body[id] = Number(fields[id].value || 0);
+      try {
+        render(await api("/api/voice-target", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }));
+        setStatus("参数已保存。");
+      } catch (error) {
+        setStatus(`保存失败：${error.message}`);
+      }
+    }
+
+    document.getElementById("refresh").addEventListener("click", refresh);
+    document.getElementById("save").addEventListener("click", saveParams);
+    refresh();
+  </script>
+</body>
+</html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     def handle(self) -> None:
         try:
             super().handle()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
 
     def log_message(self, format: str, *args: object) -> None:
@@ -1570,6 +1880,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/control":
+            if not self.valid_key():
+                self.send_response(302)
+                self.send_header("Location", f"/control?key={urllib.parse.quote(TOKEN)}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_text(200, CONTROL_PAGE, "text/html; charset=utf-8")
+            return
+        if parsed.path == "/api/voice-target":
+            if not self.valid_key():
+                self.send_text(403, "Forbidden")
+                return
+            self.send_text(
+                200,
+                json.dumps(voice_target_status(), ensure_ascii=False),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/snapshot":
             if not self.valid_key():
                 self.send_text(403, "Forbidden")
@@ -1604,6 +1933,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/voice-target" and self.valid_key():
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            current = load_voice_tap_config()
+            update = {
+                "device_serial": str(payload.get("device_serial", current["device_serial"]) or ""),
+                "x": payload.get("x", current["x"]),
+                "y": payload.get("y", current["y"]),
+                "delay_ms": payload.get("delay_ms", current["delay_ms"]),
+                "hold_ms": payload.get("hold_ms", current["hold_ms"]),
+            }
+            save_voice_tap_config(update)
+            self.send_text(
+                200,
+                json.dumps(voice_target_status(), ensure_ascii=False),
+                "application/json; charset=utf-8",
+            )
+            return
+
         if parsed.path == "/mouse" and self.valid_key():
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
