@@ -349,12 +349,10 @@ def is_chat_target() -> bool:
 
 def is_gpt_web_context(context: WindowContext, focus_text: str) -> bool:
     process = context.process_name.casefold()
-    if process not in {"msedge.exe", "chrome.exe"}:
-        return False
     haystack = "\n".join([context.title, focus_text]).casefold()
     if "prosemirror" not in haystack:
         return False
-    return any(
+    has_chat_marker = any(
         marker in haystack
         for marker in (
             "text-token",
@@ -366,6 +364,11 @@ def is_gpt_web_context(context: WindowContext, focus_text: str) -> bool:
             "col-start-1",
         )
     )
+    if not has_chat_marker:
+        return False
+    if process in {"msedge.exe", "chrome.exe", "explorer.exe", ""}:
+        return True
+    return any(browser_name in process for browser_name in ("edge", "chrome"))
 
 
 def is_probably_chat_input(control: object) -> bool:
@@ -1040,9 +1043,24 @@ def list_adb_devices() -> list[dict[str, str]]:
             if ":" in item:
                 key, value = item.split(":", 1)
                 meta[key] = value
+        hardware_serial = ""
+        if state == "device":
+            try:
+                serial_result = subprocess.run(
+                    [adb, "-s", serial, "shell", "getprop", "ro.serialno"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    check=False,
+                )
+                hardware_serial = serial_result.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                hardware_serial = ""
         devices.append(
             {
                 "serial": serial,
+                "hardware_serial": hardware_serial,
                 "state": state,
                 "model": meta.get("model", ""),
                 "product": meta.get("product", ""),
@@ -1060,7 +1078,10 @@ def voice_target_status() -> dict[str, object]:
         "ok": True,
         "config": config,
         "devices": devices,
-        "target_connected": any(device["serial"] == target and device["state"] == "device" for device in devices),
+        "target_connected": any(
+            device["state"] == "device" and target in {device["serial"], device.get("hardware_serial", "")}
+            for device in devices
+        ),
     }
 
 
@@ -1070,28 +1091,26 @@ def adb_base_command(adb: str, device_serial: str = "") -> list[str]:
     return [adb]
 
 
+def resolve_adb_device_serial(adb: str, configured_serial: str) -> str:
+    configured_serial = str(configured_serial or "")
+    if not configured_serial:
+        return ""
+    for device in list_adb_devices():
+        if device["state"] != "device":
+            continue
+        if configured_serial in {device["serial"], device.get("hardware_serial", "")}:
+            return device["serial"]
+    return ""
+
+
 def is_configured_adb_device_connected(adb: str, device_serial: str) -> bool:
     if not device_serial:
         (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(
             "voice target blocked: voice_tap_config.json has no device_serial\n"
         )
         return False
-    try:
-        result = subprocess.run(
-            [adb, "devices"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(f"adb devices failed: {exc!r}\n")
-        return False
-    for line in result.stdout.splitlines()[1:]:
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] == device_serial and parts[1] == "device":
-            return True
+    if resolve_adb_device_serial(adb, device_serial):
+        return True
     (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(
         f"voice target blocked: configured device {device_serial} is not connected\n"
     )
@@ -1107,10 +1126,16 @@ def launch_android_app(device_serial: str = "") -> None:
     adb = find_adb()
     if not adb:
         return
+    resolved_serial = resolve_adb_device_serial(adb, device_serial) if device_serial else ""
+    if device_serial and not resolved_serial:
+        (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(
+            f"adb launch blocked: configured device {device_serial} is not connected\n"
+        )
+        return
     try:
         subprocess.Popen(
             [
-                *adb_base_command(adb, device_serial),
+                *adb_base_command(adb, resolved_serial),
                 "shell",
                 "input",
                 "keyevent",
@@ -1122,7 +1147,7 @@ def launch_android_app(device_serial: str = "") -> None:
         )
         subprocess.Popen(
             [
-                *adb_base_command(adb, device_serial),
+                *adb_base_command(adb, resolved_serial),
                 "shell",
                 "am",
                 "start",
@@ -1149,12 +1174,18 @@ def tap_android_voice_button() -> None:
         return
     config = load_voice_tap_config()
     device_serial = str(config.get("device_serial", "") or "")
+    resolved_serial = resolve_adb_device_serial(adb, device_serial)
+    if not resolved_serial:
+        (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(
+            f"adb voice tap blocked: configured device {device_serial} is not connected\n"
+        )
+        return
     try:
         launch_android_app(device_serial)
         time.sleep(max(0, config["delay_ms"]) / 1000)
         subprocess.Popen(
             [
-                *adb_base_command(adb, device_serial),
+                *adb_base_command(adb, resolved_serial),
                 "shell",
                 "input",
                 "swipe",
@@ -1180,12 +1211,14 @@ def send_android_voice_motion(action: str, config: dict[str, object] | None = No
     if config is None:
         config = load_voice_tap_config()
     device_serial = str(config.get("device_serial", "") or "")
-    if not is_configured_adb_device_connected(adb, device_serial):
+    resolved_serial = resolve_adb_device_serial(adb, device_serial)
+    if not resolved_serial:
+        is_configured_adb_device_connected(adb, device_serial)
         return
     try:
         subprocess.run(
             [
-                *adb_base_command(adb, device_serial),
+                *adb_base_command(adb, resolved_serial),
                 "shell",
                 "input",
                 "motionevent",
