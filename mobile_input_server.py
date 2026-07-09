@@ -958,19 +958,21 @@ def capture_pc_text_before_click() -> None:
 
 def maybe_clear_phone_after_pc_send() -> None:
     global PC_TEXT_BEFORE_CLICK
-    time.sleep(PC_SEND_CLEAR_DELAY_MS / 1000)
-    if not is_allowed_target():
-        return
     before = PC_TEXT_BEFORE_CLICK
     PC_TEXT_BEFORE_CLICK = None
     if before in (None, ""):
         return
-    try:
-        after = read_focused_input_text()
-    except Exception:
-        after = None
-    if after == "":
-        broadcast_clear()
+    for delay_ms in (60, 80, 120, 160, 280, 300):
+        time.sleep(delay_ms / 1000)
+        try:
+            after = read_focused_input_text()
+        except Exception:
+            after = None
+        if after in (None, ""):
+            broadcast_clear()
+            return
+        if after != before:
+            return
 
 
 def clear_phone_after_keyboard_send() -> None:
