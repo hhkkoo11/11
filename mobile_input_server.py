@@ -116,6 +116,7 @@ NON_CHAT_INPUT_NAME_KEYWORDS = (
     "omnibox",
 )
 last_adb_launch = 0.0
+ADB_RESOLVE_CACHE: dict[str, tuple[str, float]] = {}
 PHONE_DRAFT_LOCK = threading.Lock()
 PHONE_DRAFT_LENGTH = 0
 PHONE_DRAFT_TEXT = ""
@@ -993,6 +994,7 @@ def load_voice_tap_config() -> dict[str, object]:
 
 
 def save_voice_tap_config(config: dict[str, object]) -> dict[str, object]:
+    global ADB_RESOLVE_CACHE
     current = load_voice_tap_config()
     merged = {
         "device_serial": str(config.get("device_serial", current["device_serial"]) or ""),
@@ -1004,6 +1006,7 @@ def save_voice_tap_config(config: dict[str, object]) -> dict[str, object]:
     if merged["hold_ms"] < 1:
         merged["hold_ms"] = 1
     VOICE_TAP_CONFIG_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    ADB_RESOLVE_CACHE = {}
     return merged
 
 
@@ -1095,11 +1098,17 @@ def resolve_adb_device_serial(adb: str, configured_serial: str) -> str:
     configured_serial = str(configured_serial or "")
     if not configured_serial:
         return ""
+    cached = ADB_RESOLVE_CACHE.get(configured_serial)
+    now = time.monotonic()
+    if cached and now - cached[1] < 5.0:
+        return cached[0]
     for device in list_adb_devices():
         if device["state"] != "device":
             continue
         if configured_serial in {device["serial"], device.get("hardware_serial", "")}:
+            ADB_RESOLVE_CACHE[configured_serial] = (device["serial"], now)
             return device["serial"]
+    ADB_RESOLVE_CACHE.pop(configured_serial, None)
     return ""
 
 
