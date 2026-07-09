@@ -51,6 +51,7 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MainActivity extends Activity {
     private static final String DEFAULT_BASE_URL = "http://192.168.20.75:8787";
@@ -75,6 +76,7 @@ public class MainActivity extends Activity {
     private final Object mouseLock = new Object();
     private final AtomicBoolean mouseFlushScheduled = new AtomicBoolean(false);
     private final AtomicBoolean mouseRequestInFlight = new AtomicBoolean(false);
+    private final AtomicInteger syncRevision = new AtomicInteger(0);
     private float pendingMouseDx = 0f;
     private float pendingMouseDy = 0f;
     private float pendingWheelX = 0f;
@@ -392,7 +394,7 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 setDot(computerDot, true);
                 showFlash("已自动更新电脑连接");
-                fetchSnapshot(true);
+                fetchSnapshot(false);
             });
         }
     }
@@ -526,6 +528,12 @@ public class MainActivity extends Activity {
                 String text = json.optString("text", "");
                 runOnUiThread(() -> {
                     long applyNow = System.currentTimeMillis();
+                    String localText = input.getText().toString();
+                    if (text.isEmpty() && !localText.isEmpty()) {
+                        setDot(inputDot, true);
+                        setDot(syncDot, true);
+                        return;
+                    }
                     if ((force || applyNow - lastLocalEditMs >= LOCAL_EDIT_PROTECT_MS)
                             && input.getText().toString().equals(baseText)) {
                         applySnapshotText(text);
@@ -646,7 +654,11 @@ public class MainActivity extends Activity {
     }
 
     private void postSync(int deleteCount, String insertText, int suffixCount, boolean enter, String fullText) {
+        int revision = syncRevision.incrementAndGet();
         network.execute(() -> {
+            if (!enter && revision != syncRevision.get()) {
+                return;
+            }
             HttpURLConnection connection = null;
             try {
                 URL url = new URL(baseUrl + "/sync?key=" + accessKey);

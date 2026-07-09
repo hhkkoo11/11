@@ -963,9 +963,14 @@ def maybe_clear_phone_after_pc_send() -> None:
         return
     before = PC_TEXT_BEFORE_CLICK
     PC_TEXT_BEFORE_CLICK = None
-    if before in (None, "") and not has_phone_draft():
+    if before in (None, ""):
         return
-    broadcast_clear()
+    try:
+        after = read_focused_input_text()
+    except Exception:
+        after = None
+    if after == "":
+        broadcast_clear()
 
 
 def clear_phone_after_keyboard_send() -> None:
