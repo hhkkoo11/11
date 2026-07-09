@@ -874,6 +874,12 @@ def broadcast_voice() -> None:
 
 def broadcast_clear() -> None:
     mark_phone_draft_cleared()
+    try:
+        (APP_DIR / "server.err.log").open("a", encoding="utf-8").write(
+            f"broadcast clear to {len(list(FOCUS_QUEUES))} event clients\n"
+        )
+    except Exception:
+        pass
     broadcast_event("clear")
 
 
@@ -960,7 +966,8 @@ def maybe_clear_phone_after_pc_send() -> None:
     global PC_TEXT_BEFORE_CLICK
     before = PC_TEXT_BEFORE_CLICK
     PC_TEXT_BEFORE_CLICK = None
-    if before in (None, ""):
+    had_phone_draft = has_phone_draft()
+    if before in (None, "") and not had_phone_draft:
         return
     for delay_ms in (60, 80, 120, 160, 280, 300):
         time.sleep(delay_ms / 1000)
@@ -971,6 +978,8 @@ def maybe_clear_phone_after_pc_send() -> None:
         if after in (None, ""):
             broadcast_clear()
             return
+        if before in (None, ""):
+            continue
         if after != before:
             return
 
